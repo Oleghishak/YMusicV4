@@ -18,7 +18,7 @@
     <string name="downloads_summary_finished">Завершено: %1$d</string>
     <string name="downloads_summary_failed">Помилок: %1$d</string>
     <string name="downloads_summary_paused">На паузі: %1$d</string>
-    <string name="downloads_pause_all">Призупинити всі</string>
+    <string name="downloads_pause_all">Призупинити все</string>
     <string name="share_play">Відтворити</string>
     <string name="share_download_mp3">Завантажити MP3</string>
     <string name="share_download_m4a">Завантажити M4A</string>
