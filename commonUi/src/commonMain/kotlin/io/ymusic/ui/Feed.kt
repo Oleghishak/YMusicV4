@@ -76,6 +76,7 @@ import io.ymusic.ui.resources.error_playlist_backup_invalid
 import io.ymusic.ui.resources.error_playlist_backup_newer
 import io.ymusic.ui.resources.error_supervised_account
 import io.ymusic.ui.resources.feed_empty
+import io.ymusic.ui.resources.media_engine_unavailable
 import io.ymusic.ui.resources.menu_add_to_playlist
 import io.ymusic.ui.resources.menu_play_single
 import io.ymusic.ui.resources.menu_remove
@@ -108,7 +109,9 @@ import kotlinx.coroutines.withTimeout
 import org.jetbrains.compose.resources.getString
 import org.jetbrains.compose.resources.stringResource
 import projectcommon.error.DISK_FULL_CODE
+import projectcommon.error.PLAYBACK_UNAVAILABLE_CODE
 import projectcommon.error.errorCode
+import projectcommon.log.captureUnlessNetwork
 
 /** Paged feed loading over any yt page source (browse / search / watch-next continuations).
  *  [fetchTimeoutMs] is the watchdog for a wedged engine (seen live: Android CookieManager deadlocking
@@ -189,7 +192,7 @@ class Pager(
             } catch (e: CancellationException) {
                 throw e // a newer refresh took over the state — this coroutine just dies
             } catch (e: Exception) {
-                logger?.captureError(e)
+                logger?.captureUnlessNetwork(e)
                 State.Failed(e.errorCode() ?: "E20032", e.message)
             }
         }
@@ -221,7 +224,7 @@ class Pager(
                 _errors.tryEmit(TIMEOUT_CODE)
                 current.copy(refreshing = false)
             } catch (e: Exception) {
-                logger?.captureError(e)
+                logger?.captureUnlessNetwork(e)
                 _errors.tryEmit(e.errorCode() ?: "E20033")
                 current.copy(refreshing = false)
             }
@@ -291,7 +294,7 @@ class Pager(
                 logger?.log(Logger.Level.WARN, "loadMore timed out after ${fetchTimeoutMs}ms", e)
                 current.copy(loadingMore = false) // timed out — the tail button stays for a retry
             } catch (e: Exception) {
-                logger?.captureError(e)
+                logger?.captureUnlessNetwork(e)
                 // Keep what we have; the tail button stays for a retry.
                 current.copy(loadingMore = false)
             }
@@ -505,6 +508,7 @@ internal fun errorMessage(code: String): String = errorText(code).resolve()
 internal fun errorText(code: String): UiText = when (code) {
     "network" -> UiText.Resource(Res.string.error_network)
     DISK_FULL_CODE -> UiText.Resource(Res.string.error_disk_full)
+    PLAYBACK_UNAVAILABLE_CODE -> UiText.Resource(Res.string.media_engine_unavailable)
     StillProcessingException.CODE -> UiText.Resource(Res.string.error_live_still_processing)
     CAPTCHA_CODE -> UiText.Resource(Res.string.error_captcha)
     SUPERVISED_ACCOUNT_CODE -> UiText.Resource(Res.string.error_supervised_account)
@@ -582,7 +586,7 @@ private fun FeedSections(
         val listState = hoistedListState ?: rememberLazyListState()
         // Report scroll to the shell (which lifts the app bar); the feed doesn't touch the bar itself.
         TrackScroll { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0 }
-        LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = LocalMiniPlayerInset.current)) {
+        LazyColumn(Modifier.fillMaxSize().listKeyboardNavigation(), state = listState, contentPadding = PaddingValues(bottom = LocalMiniPlayerInset.current)) {
             if (topContent != null) item { topContent() }
             // A 0-height chip slot at index 0 makes firstVisibleItemIndex > 0 while still at the top.
             val hasChips = state.chips.isNotEmpty() || state.sort.isNotEmpty()
@@ -917,8 +921,8 @@ private fun FeedSortMenu(options: List<YtChip>, modifier: Modifier = Modifier, o
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.Sort,
-                    stringResource(Res.string.cd_sort),
-                    Modifier.size(16.dp),
+                    null,
+                    Modifier.size(16.dp).spokenAs(stringResource(Res.string.cd_sort)),
                     tint = DesignColors.InkSoft,
                 )
                 Text(
@@ -947,10 +951,11 @@ private fun FeedSortMenu(options: List<YtChip>, modifier: Modifier = Modifier, o
     }
 }
 
-/** One feed filter pill; [onClick] null = a non-interactive label in the same style. */
+/** One feed filter pill; [onClick] null = a non-interactive label in the same style. [choice] false
+ *  when [selected] only emphasizes an action, so screen readers don't call it selected. */
 @Composable
-fun FeedChip(title: String, selected: Boolean, onClick: (() -> Unit)?) {
-    ChipTapArea(onClick) { indication ->
+fun FeedChip(title: String, selected: Boolean, choice: Boolean = true, onClick: (() -> Unit)?) {
+    ChipTapArea(onClick, selected = selected.takeIf { choice }) { indication ->
         Text(
             title,
             style = TextStyle(fontSize = ChipTextSize, color = if (selected) Color.White else DesignColors.InkSoft),

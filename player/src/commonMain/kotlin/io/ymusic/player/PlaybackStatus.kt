@@ -1,6 +1,7 @@
 package io.ymusic.player
 
 import projectcommon.error.CodedError
+import projectcommon.error.PLAYBACK_UNAVAILABLE_CODE
 
 /**
  * Engine + media lifecycle, preserving the legacy player contract. [readyToLoad] means an ordinary
@@ -11,9 +12,10 @@ sealed class PlaybackState(val readyToLoad: Boolean) {
     /** The engine does not yet have a usable native/page session. */
     data class Uninitialized(val isInitializing: Boolean) : PlaybackState(readyToLoad = false)
 
-    /** A failed load/session. A broken session must be reset before another load. */
+    /** A failed load/session. A broken session must be reset before another load; otherwise the
+     *  error belongs to the failed item ([PlayerError.canRetry] is about retrying that item). */
     data class Error(val error: PlayerError) :
-        PlaybackState(readyToLoad = error.canRetry && !error.needReset)
+        PlaybackState(readyToLoad = !error.needReset)
 
     /** The initialized engine has no media loaded. */
     data object Idle : PlaybackState(readyToLoad = true)
@@ -110,6 +112,9 @@ data class PlayerError(
 
         /** The app no longer holds the storage grant for a local item's folder (Android SAF) — re-adding the folder fixes it. */
         const val FOLDER_ACCESS_LOST = "folder_access_lost"
+
+        /** This host cannot play anything at all ([PlayerEngines.unavailable]); the shell has reported why. */
+        const val PLAYBACK_UNAVAILABLE = PLAYBACK_UNAVAILABLE_CODE
 
         /** The platform video decoder refused the stream (size or profile beyond the device). */
         const val VIDEO_DECODER_FAILED = "E60064"

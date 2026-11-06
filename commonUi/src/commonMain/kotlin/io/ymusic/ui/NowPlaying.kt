@@ -107,21 +107,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -149,6 +156,11 @@ import io.ymusic.settings.AppSettings
 import io.ymusic.settings.flow
 import io.ymusic.settings.put
 import io.ymusic.ui.resources.Res
+import io.ymusic.ui.resources.a11y_behind_live
+import io.ymusic.ui.resources.a11y_downloaded
+import io.ymusic.ui.resources.a11y_now_playing
+import io.ymusic.ui.resources.a11y_playback_position
+import io.ymusic.ui.resources.a11y_x_of_y
 import io.ymusic.ui.resources.audio_only
 import io.ymusic.ui.resources.badge_live
 import io.ymusic.ui.resources.captions_auto_translate
@@ -156,7 +168,6 @@ import io.ymusic.ui.resources.captions_off
 import io.ymusic.ui.resources.cd_captions
 import io.ymusic.ui.resources.cd_close
 import io.ymusic.ui.resources.cd_download
-import io.ymusic.ui.resources.cd_drag_to_reorder
 import io.ymusic.ui.resources.cd_exit_fullscreen
 import io.ymusic.ui.resources.cd_fill_video
 import io.ymusic.ui.resources.cd_fit_video
@@ -182,6 +193,7 @@ import io.ymusic.ui.resources.error_captcha
 import io.ymusic.ui.resources.error_network
 import io.ymusic.ui.resources.error_supervised_account
 import io.ymusic.ui.resources.ic_sponsor_block
+import io.ymusic.ui.resources.media_engine_unavailable
 import io.ymusic.ui.resources.menu_add_to_playlist
 import io.ymusic.ui.resources.menu_details_comments
 import io.ymusic.ui.resources.menu_go_to_album
@@ -190,6 +202,7 @@ import io.ymusic.ui.resources.menu_reload_player
 import io.ymusic.ui.resources.menu_search_lyrics
 import io.ymusic.ui.resources.menu_speed_pitch
 import io.ymusic.ui.resources.menu_start_radio
+import io.ymusic.ui.resources.play_again_track_of
 import io.ymusic.ui.resources.playback_add_folder_again
 import io.ymusic.ui.resources.playback_botguard_failed
 import io.ymusic.ui.resources.playback_failed
@@ -248,6 +261,13 @@ private fun inlineControlsOffscreen(listState: LazyListState): Boolean {
     return item0 == null || item0.offset + item0.size <= 0
 }
 
+/** True when list item 0 is taller than the list itself: in a window this short the inline transport never shows whole. */
+private fun inlineControlsClipped(listState: LazyListState): Boolean {
+    val layoutInfo = listState.layoutInfo
+    val item0 = layoutInfo.visibleItemsInfo.find { it.index == 0 } ?: return false
+    return item0.size > layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+}
+
 /**
  * The docked mini-player (design/final/library.html `.mini`): tap to expand to Now Playing.
  *
@@ -302,7 +322,12 @@ fun MiniPlayer(
                     AudioOnlyCover(item.displayThumbnailUrl, Modifier.fillMaxSize())
                 }
                 BufferingIndicator(status, size = 22.dp, strokeWidth = 2.dp)
-                Box(Modifier.matchParentSize().clickable(onClick = onExpand))
+                Box(
+                    Modifier.matchParentSize()
+                        .focusProperties { canFocus = false }
+                        .a11ySilent()
+                        .clickable(onClick = onExpand),
+                )
             }
             Column(
                 Modifier.weight(1f)
@@ -311,7 +336,7 @@ fun MiniPlayer(
             ) {
                 LinearProgressIndicator(
                     progress = { if (duration > 0) progress.positionMs.toFloat() / duration else 0f },
-                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                    modifier = Modifier.fillMaxWidth().height(4.dp).a11ySilent(),
                     color = DesignColors.Accent,
                     trackColor = Color.Transparent,
                     strokeCap = StrokeCap.Butt,
@@ -338,15 +363,23 @@ fun MiniPlayer(
                             )
                         }
                     }
-                    IconButton(onClick = { coordinator.player.togglePlay() }) {
+                    IconButton(
+                        onClick = { coordinator.player.togglePlay() },
+                        modifier = Modifier.a11yActionLabel(
+                            stringResource(if (status.showsPause()) Res.string.cd_pause else Res.string.cd_play),
+                        ),
+                    ) {
                         Icon(
-                            if (status.playWhenReady) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            stringResource(if (status.playWhenReady) Res.string.cd_pause else Res.string.cd_play),
+                            if (status.showsPause()) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            null,
                             tint = DesignColors.InkMuted,
                         )
                     }
-                    IconButton(onClick = { coordinator.player.skipNext() }) {
-                        Icon(Icons.Default.SkipNext, stringResource(Res.string.cd_next), tint = DesignColors.InkMuted)
+                    IconButton(
+                        onClick = { coordinator.player.skipNext() },
+                        modifier = Modifier.a11yActionLabel(stringResource(Res.string.cd_next)),
+                    ) {
+                        Icon(Icons.Default.SkipNext, null, tint = DesignColors.InkMuted)
                     }
                 }
             }
@@ -355,11 +388,11 @@ fun MiniPlayer(
 }
 
 /**
- * Full Now Playing (design/final/now-playing.html). Layout follows the window's orientation:
+ * Full Now Playing (design/final/now-playing.html). Layout follows the window's shape:
  * portrait/tablet = the top-bar · video · meta · seek · transport · queue column; landscape
- * (width > height) = the split — video fills the left with the controls overlaid on it, and a fixed
- * right pane carries the top bar and the queue. Full screen overrides both: video only, edge to
- * edge, with the auto-hiding overlay.
+ * (width > height, from [SideBySideMinWidth]) = the split — video fills the left with the controls
+ * overlaid on it, and a fixed right pane carries the top bar and the queue. Full screen overrides
+ * both: video only, edge to edge, with the auto-hiding overlay.
  */
 private val LocalOpenChannel = staticCompositionLocalOf<(url: String, title: String) -> Unit> { { _, _ -> } }
 
@@ -403,10 +436,17 @@ fun NowPlayingScreen(
     }
     val shell = @Composable {
         BoxWithConstraints {
+            val wide = maxWidth > maxHeight
             when {
                 fullscreen -> FullscreenVideo(graph, coordinator, onExit = { fullscreen = false })
-                maxWidth > maxHeight -> LandscapeNowPlaying(graph, coordinator, onClose, onFullscreen = { fullscreen = true })
-                else -> PortraitNowPlaying(graph, coordinator, onClose, onFullscreen = { fullscreen = true })
+                wide && maxWidth >= SideBySideMinWidth -> LandscapeNowPlaying(graph, coordinator, onClose, onFullscreen = { fullscreen = true })
+                else -> PortraitNowPlaying(
+                    graph,
+                    coordinator,
+                    onClose,
+                    onFullscreen = { fullscreen = true },
+                    videoHeight = if (wide) minOf(maxWidth * 9f / 16f, maxHeight * WideStackedVideoShare) else null,
+                )
             }
         }
     }
@@ -419,7 +459,14 @@ fun NowPlayingScreen(
         // No full-screen fill: the video hole is opaque (TextureView) and the chrome paints
         // Surface itself. A wrapping Surface under the picture is 1× overdraw on every pixel.
         CompositionLocalProvider(LocalOpenChannel provides onOpenChannel, LocalOpenLogin provides onLogin) {
-            Box(Modifier.fillMaxSize(), content = { shell() })
+            // A key press brings back auto-hidden video controls, so Tab can reach them again.
+            Box(
+                Modifier.fillMaxSize().onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && VideoOverlayNative.armed) VideoOverlayNative.show()
+                    false
+                },
+                content = { shell() },
+            )
         }
     }
 }
@@ -490,7 +537,7 @@ private fun FullscreenVideo(graph: AppGraph, coordinator: PlaybackCoordinator, o
                 )
             }
             status.error?.let { PlaybackErrorText(graph, it, VideoOverlayNative.showing) }
-            PlayerCaptionOverlay(graph.player, VideoOverlayNative.showing, fill = fillScreen)
+            PlayerCaptionOverlay(graph, graph.player, VideoOverlayNative.showing, fill = fillScreen)
         }
     }
 }
@@ -502,6 +549,7 @@ private fun PortraitNowPlaying(
     coordinator: PlaybackCoordinator,
     onClose: () -> Unit,
     onFullscreen: () -> Unit,
+    videoHeight: Dp? = null,
 ) {
     val player = coordinator.player
     val status by player.status.collectAsState()
@@ -519,7 +567,7 @@ private fun PortraitNowPlaying(
     // Do not onDispose armed=false here: Compose disposes Portrait after Landscape
     // has set armed=true, which left clicks ignored (poke requires armed).
     LaunchedEffect(listState) {
-        snapshotFlow { inlineControlsOffscreen(listState) }.collect { off ->
+        snapshotFlow { inlineControlsOffscreen(listState) || inlineControlsClipped(listState) }.collect { off ->
             val becameArmed = off && !VideoOverlayNative.armed
             VideoOverlayNative.armed = off
             // Only when item 0 first leaves the viewport — not on later queue scrolls.
@@ -529,6 +577,8 @@ private fun PortraitNowPlaying(
     // Queue rows sit after the controls item and the sticky header in this list.
     val dragState = rememberReorderDragState(listState, indexOffset = 2) { from, to -> player.move(from, to) }
     val locateCurrent = rememberLocateCurrent(listState, queue.currentIndex, indexOffset = 2)
+    // Opens on item 0 (video, title, seek bar, transport): the queue shares this list, so jumping to the
+    // playing row would scroll the controls away.
 
     Column(
         Modifier.fillMaxSize()
@@ -540,7 +590,8 @@ private fun PortraitNowPlaying(
         // Video surface — the shell's shared container; each engine shows/hides its own picture.
         // Black: HW overlay letterbox is transparent, so this fill is the bars.
         Box(
-            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+            Modifier.fillMaxWidth()
+                .then(if (videoHeight != null) Modifier.height(videoHeight) else Modifier.aspectRatio(16f / 9f))
                 .then(if (desktopLayoutHole) Modifier else Modifier.background(Color.Black)),
         ) {
             PlayerSurfaceHole(
@@ -562,7 +613,7 @@ private fun PortraitNowPlaying(
                 }
                 status.error?.let { PlaybackErrorText(graph, it, VideoOverlayNative.showing) }
                 val overlayOn = VideoOverlayNative.showing
-                PlayerCaptionOverlay(player, overlayVisible = overlayOn)
+                PlayerCaptionOverlay(graph, player, overlayVisible = overlayOn)
                 if (!overlayOn) {
                     Row(
                         Modifier.align(Alignment.BottomEnd).padding(end = 6.dp, bottom = 4.dp),
@@ -606,7 +657,7 @@ private fun PortraitNowPlaying(
                         )
                     }
                     SeekBar(player, progress)
-                    TransportRow(coordinator, status.playWhenReady)
+                    TransportRow(coordinator, status.showsPause())
                 }
             }
             stickyHeader {
@@ -628,7 +679,8 @@ private fun PortraitNowPlaying(
                 }
             }
             itemsIndexed(queue.items) { index, item ->
-                QueueRow(coordinator, index, item, current = index == queue.currentIndex, dragState)
+                val current = index == queue.currentIndex
+                QueueRow(coordinator, index, item, current = current, dragState)
             }
             queue.more?.let { more -> item { QueueMoreRow(player, more) } }
         }
@@ -674,7 +726,7 @@ private fun LandscapeNowPlaying(
                         VideoOverlayControls(coordinator, status, progress, current, onToggleFullscreen = onFullscreen)
                     }
                     status.error?.let { PlaybackErrorText(graph, it, VideoOverlayNative.showing) }
-                    PlayerCaptionOverlay(player, VideoOverlayNative.showing)
+                    PlayerCaptionOverlay(graph, player, VideoOverlayNative.showing)
                 }
             }
             VerticalDivider(color = DesignColors.Divider)
@@ -690,15 +742,31 @@ private fun LandscapeNowPlaying(
                 HorizontalDivider(color = DesignColors.Divider)
                 val dragState = rememberReorderDragState(queueListState, indexOffset = 0) { from, to -> player.move(from, to) }
                 FollowCurrentQueueItem(queueListState, queue.currentIndex)
-                LazyColumn(state = queueListState, modifier = Modifier.weight(1f)) {
+                // Keyboard entry lands on the playing row, as in portrait.
+                val currentRowFocus = remember { FocusRequester() }
+                if (!platformUsesTouch) {
+                    LaunchedEffect(Unit) {
+                        if (queue.currentIndex >= 0) currentRowFocus.focusListItem(queueListState, queue.currentIndex)
+                    }
+                }
+                LazyColumn(state = queueListState, modifier = Modifier.weight(1f).listKeyboardNavigation()) {
                     itemsIndexed(queue.items) { index, item ->
-                        QueueRow(coordinator, index, item, current = index == queue.currentIndex, dragState, large = largeRows)
+                        val current = index == queue.currentIndex
+                        QueueRow(coordinator, index, item, current = current, dragState, large = largeRows,
+                            focusRequester = if (current) currentRowFocus else null)
                     }
                     queue.more?.let { more -> item { QueueMoreRow(player, more) } }
                 }
             }
         }
     }
+}
+
+/** Scrolls list item [index] (the one carrying this requester) into view and focuses it once it is composed. */
+private suspend fun FocusRequester.focusListItem(listState: LazyListState, index: Int) {
+    listState.scrollToItem(index)
+    snapshotFlow { listState.layoutInfo.visibleItemsInfo.any { it.index == index } }.first { it }
+    requestFocus()
 }
 
 /**
@@ -756,16 +824,25 @@ private fun rememberLocateCurrent(listState: LazyListState, currentIndex: Int, i
     }
 }
 
+private val QueuePaneMinWidth = 320.dp
+
 /** The landscape queue pane: 30% of the window, kept between 320dp (phones) and 480dp (desktops). */
-private fun queuePaneWidth(windowWidth: Dp): Dp = (windowWidth * 0.3f).coerceIn(320.dp, 480.dp)
+private fun queuePaneWidth(windowWidth: Dp): Dp = (windowWidth * 0.3f).coerceIn(QueuePaneMinWidth, 480.dp)
+
+/** Below this the queue pane would out-size the video, as on a phone's split-screen half, so video and
+ *  queue stack. A full-screen 360×640dp phone in landscape still fits side by side. */
+private val SideBySideMinWidth = QueuePaneMinWidth * 2
+
+/** Most of a wider-than-tall window's height the stacked video may take, so the list below stays usable. */
+private const val WideStackedVideoShare = 0.6f
 
 /** Pane width from which queue rows take the larger thumb and text. */
 private val QueueLargeRowsFrom = 380.dp
 
 /**
  * Hosts video-overlay [content] with player-style auto-hide: it fades out after a few seconds of
- * playback, and a tap/click on the video toggles it. Dragging the seek bar holds it visible.
- * While paused nothing auto-hides.
+ * playback, and a tap/click on the video toggles it. Dragging the seek bar or keyboard focus inside
+ * holds it visible. While paused nothing auto-hides.
  */
 @Composable
 private fun BoxScope.AutoHidingOverlay(
@@ -783,8 +860,11 @@ private fun BoxScope.AutoHidingOverlay(
                 },
         )
     }
+    var focusWithin by remember { mutableStateOf(false) }
+    LaunchedEffect(show) { if (!show) focusWithin = false }
+    HoldVideoOverlay(show && focusWithin)
     if (show) {
-        Box(Modifier.fillMaxSize(), content = content)
+        Box(Modifier.fillMaxSize().onFocusChanged { focusWithin = it.hasFocus }, content = content)
     }
 }
 
@@ -812,7 +892,7 @@ private fun BoxScope.BufferingIndicator(
     )
 }
 
-/** The controls drawn over the video: landscape always, portrait once the inline controls scroll away. */
+/** The controls drawn over the video: landscape always, portrait once the inline controls scroll away or can't fit. */
 @Composable
 private fun BoxScope.VideoOverlayControls(
     coordinator: PlaybackCoordinator,
@@ -854,7 +934,7 @@ private fun BoxScope.VideoOverlayControls(
     Box(Modifier.align(Alignment.Center)) {
         TransportRow(
             coordinator,
-            status.playWhenReady,
+            status.showsPause(),
             iconTint = Color.White,
             playBackground = Color.Black.copy(alpha = 0.42f),
             playForeground = Color.White,
@@ -875,8 +955,8 @@ private fun BoxScope.VideoOverlayControls(
         ) {
             val overlayStyle = TextStyle(fontSize = 10.sp * scale, fontWeight = FontWeight.Bold, color = Color(0xFFEEEEEE))
             labelProgress.progressLabel?.let {
-                Text(it, style = overlayStyle)
-                Text(" / ", style = overlayStyle)
+                Text(it, style = overlayStyle, modifier = Modifier.a11ySilent())
+                Text(" / ", style = overlayStyle, modifier = Modifier.a11ySilent())
             }
             DurationLabel(player, progress, overlayStyle)
             Box(Modifier.weight(1f))
@@ -941,6 +1021,7 @@ private fun VideoOverlayHost(modifier: Modifier, content: @Composable BoxScope.(
  */
 @Composable
 private fun BoxScope.PlayerCaptionOverlay(
+    graph: AppGraph,
     player: io.ymusic.player.Player,
     overlayVisible: Boolean,
     fill: Boolean = false,
@@ -951,7 +1032,8 @@ private fun BoxScope.PlayerCaptionOverlay(
     val audioOnly = showsAudioOnly(player)
     val strip = VideoControlsStrip * LocalVideoOverlayScale.current
     val controlsInset by animateDpAsState(if (overlayVisible) strip else 12.dp)
-    val twoRows = captionTwoRowHeight()
+    val look = rememberCaptionLook(graph)
+    val twoRows = captionTwoRowHeight(look.scale)
     BoxWithConstraints(Modifier.matchParentSize()) {
         val ratio = status.videoSize?.aspectRatio?.takeIf { it > 0f } ?: (16f / 9f)
         val pictureWidth: Dp
@@ -967,6 +1049,7 @@ private fun BoxScope.PlayerCaptionOverlay(
         if (bar >= twoRows + strip + DesignSpacing.Space8) {
             CaptionOverlay(
                 lines,
+                look,
                 Modifier.align(Alignment.TopCenter)
                     .padding(top = bar + pictureHeight + DesignSpacing.Space8)
                     .width(pictureWidth),
@@ -974,6 +1057,7 @@ private fun BoxScope.PlayerCaptionOverlay(
         } else {
             CaptionOverlay(
                 lines,
+                look,
                 Modifier.align(Alignment.BottomCenter)
                     .padding(bottom = maxOf(bar + 12.dp, controlsInset))
                     .width(pictureWidth),
@@ -1004,10 +1088,12 @@ private fun CaptionToggle(player: io.ymusic.player.Player, offTint: Color, iconS
         open = false
         translateOpen = false
     }
+    val onTrack = tracks.firstOrNull { isOn(it) } ?: translations.firstOrNull { isOn(it) }
+    val captionState = onTrack?.displayName ?: stringResource(Res.string.captions_off)
     Box {
         ActionIcon(
             if (config.captionVisible) Icons.Default.ClosedCaption else Icons.Outlined.ClosedCaptionOff,
-            stringResource(Res.string.cd_captions),
+            "${stringResource(Res.string.cd_captions)}, $captionState",
             iconSize = iconSize,
             hitSize = hitSize,
             tint = if (config.captionVisible) DesignColors.Accent else offTint,
@@ -1074,6 +1160,7 @@ internal fun playerErrorText(error: io.ymusic.player.PlayerError): UiText = when
     error.code == SUPERVISED_ACCOUNT_CODE -> UiText.Resource(Res.string.error_supervised_account)
     error.code == io.ymusic.player.PlayerError.FILE_MISSING -> UiText.Resource(Res.string.playback_file_missing)
     error.code == io.ymusic.player.PlayerError.FOLDER_ACCESS_LOST -> UiText.Resource(Res.string.playback_folder_access_lost)
+    error.code == io.ymusic.player.PlayerError.PLAYBACK_UNAVAILABLE -> UiText.Resource(Res.string.media_engine_unavailable)
     error.code == io.ymusic.player.PlayerError.VIDEO_DECODER_FAILED -> UiText.Resource(Res.string.playback_video_unsupported)
     error.code == io.ymusic.player.PlayerError.PO_TOKEN_REJECTED -> UiText.Resource(Res.string.playback_botguard_failed)
     else -> error.userMessage?.let(UiText::Plain) ?: when (error.playability()) {
@@ -1278,12 +1365,9 @@ internal fun QualityChip(
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
                 .border(1.dp, DesignColors.OutlineSoft, RoundedCornerShape(6.dp))
-                .semantics {
-                    contentDescription = qualityDescription
-                    stateDescription = label
-                    role = Role.DropdownList
-                }
                 .clickable { open = true }
+                .a11yActionLabel("$qualityDescription, $label")
+                .clearAndSetSemantics { role = Role.DropdownList }
                 .padding(horizontal = 8.dp, vertical = 2.dp),
         )
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -1513,7 +1597,7 @@ private fun SeekBar(player: io.ymusic.player.Player, progress: Progress) {
         MediaLtr {
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 val timeStyle = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = DesignColors.InkSecondary)
-                Text(labelProgress.progressLabel.orEmpty(), style = timeStyle)
+                Text(labelProgress.progressLabel.orEmpty(), style = timeStyle, modifier = Modifier.a11ySilent())
                 Spacer(Modifier.weight(1f))
                 DurationLabel(player, progress, timeStyle)
             }
@@ -1536,9 +1620,9 @@ private fun DurationLabel(
         text,
         style = if (progress.highlightDuration) style.copy(color = DesignColors.Accent) else style,
         modifier = if (progress.durationIsLive && progress.seekable) {
-            Modifier.clickable { player.seekTo(progress.durationMs.coerceAtLeast(0L)) }
+            Modifier.clickable(role = Role.Button) { player.seekTo(progress.durationMs.coerceAtLeast(0L)) }
         } else {
-            Modifier
+            Modifier.a11ySilent()
         },
     )
 }
@@ -1568,9 +1652,27 @@ private fun SeekSlider(
             trackColor = trackColor,
             skipFractions = skipSegmentFractions(skipSegments, durationMs),
             modifier = Modifier.fillMaxWidth(),
+            a11y = seekBarA11y(progress),
         )
     }
 }
+
+/** The seek bar for screen readers: "Playback position, 1 minute 5 seconds of 3 minutes 45 seconds";
+ *  the arrow keys step it 5 seconds. */
+@Composable
+fun seekBarA11y(progress: Progress): SliderA11y {
+    val durationMs = progress.durationMs
+    val value = when {
+        progress.isLive && progress.atLiveHead() -> stringResource(Res.string.badge_live)
+        progress.isLive -> stringResource(Res.string.a11y_behind_live, spokenDuration(durationMs - progress.positionMs))
+        durationMs > 0 -> stringResource(Res.string.a11y_x_of_y, spokenDuration(progress.positionMs), spokenDuration(durationMs))
+        else -> spokenDuration(progress.positionMs)
+    }
+    val keyStep = if (durationMs > 0) SEEK_KEY_STEP_MS.toFloat() / durationMs else 0f
+    return SliderA11y(stringResource(Res.string.a11y_playback_position), value, keyStep)
+}
+
+private const val SEEK_KEY_STEP_MS = 5_000L
 
 /** rewind · prev · [play circle] · next · forward. Dark-on-white by default; the video overlay
  *  passes white glyphs on a translucent play circle. */
@@ -1644,12 +1746,14 @@ private fun TransportButtons(
             onClick = { player.skipPrev() },
         )
         Box(
-            Modifier.size(circle).clip(CircleShape).background(playBackground).clickable(role = Role.Button) { player.togglePlay() },
+            Modifier.size(circle).clip(CircleShape).background(playBackground)
+                .clickable(role = Role.Button) { player.togglePlay() }
+                .a11yActionLabel(stringResource(if (playing) Res.string.cd_pause else Res.string.cd_play)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                stringResource(if (playing) Res.string.cd_pause else Res.string.cd_play),
+                null,
                 Modifier.size((26.dp * scale).evenPx()),
                 tint = playForeground,
             )
@@ -1738,10 +1842,12 @@ private fun QueueHeader(
         Text(
             stringResource(Res.string.up_next),
             style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = DesignColors.Ink),
+            modifier = Modifier.semantics { heading() },
         )
         Text(
             "${currentIndex + 1} / $total",
             style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DesignColors.InkFaint),
+            modifier = Modifier.spokenAs(stringResource(Res.string.play_again_track_of, currentIndex + 1, total)),
         )
         if (onLocateCurrent != null) {
             ActionIcon(
@@ -1802,6 +1908,7 @@ private fun QueueRow(
     current: Boolean,
     dragState: ReorderDragState,
     large: Boolean = false,
+    focusRequester: FocusRequester? = null,
 ) {
     val dragging = dragState.draggingIndex == index
     val swipeState = rememberSwipeToDismissBoxState()
@@ -1833,7 +1940,7 @@ private fun QueueRow(
         gesturesEnabled = dragState.draggingIndex == null,
     ) {
         val swiping = swipeState.dismissDirection != SwipeToDismissBoxValue.Settled
-        QueueRowContent(coordinator, index, item, current, dragState, large, dragging, swiping)
+        QueueRowContent(coordinator, index, item, current, dragState, large, dragging, swiping, focusRequester)
     }
 }
 
@@ -1847,8 +1954,20 @@ private fun QueueRowContent(
     large: Boolean,
     dragging: Boolean,
     swiping: Boolean,
+    focusRequester: FocusRequester? = null,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    val sub = listOfNotNull(item.displayDuration, item.displaySubtitle).joinToString(" · ")
+    val playLabel = stringResource(Res.string.cd_play)
+    val videoId = (item as? PlayableItem.YtMedia)?.videoId
+    val offline = videoId != null && videoId in LocalAvailableOffline.current
+    val label = listOfNotNull(
+        if (current) stringResource(Res.string.a11y_now_playing) else null,
+        item.displayTitle,
+        item.displayDuration?.let { spokenLength(item.durationMs, it) },
+        item.displaySubtitle,
+        if (offline) stringResource(Res.string.a11y_downloaded) else null,
+    ).joinToString(", ")
     Row(
         Modifier
             .fillMaxWidth()
@@ -1860,14 +1979,16 @@ private fun QueueRowContent(
                 },
             )
             .then(if (current) Modifier.background(DesignColors.Accent.copy(alpha = 0.1f)) else Modifier)
-            .clickable { coordinator.player.playAt(index) }
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .clickable(role = Role.Button, onClickLabel = playLabel) { coordinator.player.playAt(index) }
+            .a11yActionLabel(label)
             .padding(horizontal = 16.dp, vertical = if (large) 10.dp else 8.dp),
         horizontalArrangement = Arrangement.spacedBy(if (large) 12.dp else 8.dp),
         verticalAlignment = Alignment.Top,
     ) {
         Icon(
             Icons.Default.DragHandle,
-            stringResource(Res.string.cd_drag_to_reorder),
+            null,
             Modifier
                 .align(Alignment.CenterVertically)
                 .size(18.dp)
@@ -1884,14 +2005,15 @@ private fun QueueRowContent(
             tint = if (current) DesignColors.Accent else DesignColors.Outline,
         )
         Box(
-            Modifier.size(if (large) 60.dp else 48.dp).clip(RoundedCornerShape(6.dp)),
+            Modifier.size(if (large) 60.dp else 48.dp).clip(RoundedCornerShape(6.dp)).a11ySilent(),
             contentAlignment = Alignment.Center,
         ) {
             ArtImage(item.displayThumbnailUrl, RoundedCornerShape(6.dp)) {
                 ThumbPlaceholder(Icons.Outlined.Image, 18.dp)
             }
+            if (offline) AvailableOfflineMark(Modifier.align(Alignment.TopStart))
         }
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).a11ySilent()) {
             Text(
                 item.displayTitle,
                 style = TextStyle(
@@ -1902,7 +2024,6 @@ private fun QueueRowContent(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            val sub = listOfNotNull(item.displayDuration, item.displaySubtitle).joinToString(" · ")
             if (sub.isNotEmpty()) {
                 Text(
                     sub,
@@ -1963,10 +2084,7 @@ private fun queueItemActions(coordinator: PlaybackCoordinator, index: Int, item:
             if (video != null) add(startRadio to { coordinator.playNow(video) })
             if (!current) {
                 add(
-                    playNext to {
-                        val currentIndex = player.queue.value.currentIndex
-                        if (currentIndex >= 0) player.move(index, if (index > currentIndex) currentIndex + 1 else currentIndex)
-                    },
+                    playNext to { player.moveToPlayNext(index) },
                 )
             }
             when (item) {
@@ -1987,3 +2105,6 @@ private fun queueItemActions(coordinator: PlaybackCoordinator, index: Int, item:
         },
     )
 }
+
+/** The play button shows Pause while playback is wanted, but not once the track has ended. */
+private fun PlaybackStatus.showsPause(): Boolean = playWhenReady && !state.isEnded()

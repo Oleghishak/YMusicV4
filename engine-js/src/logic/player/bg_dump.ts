@@ -11,8 +11,11 @@ const SCOPE = "yt.bg.session";
 const KEEP = 4;
 let dump: Pipe | null = null;
 let writeChain: Promise<void> = Promise.resolve();
+/** Shutdown acks on this and the runtime is freed right after: work not on it dies mid-flight. */
+let finishing: Promise<void> = Promise.resolve();
 let sessionKey = "";
 let loggedSps = 0;
+let withheldRounds = 0;
 let dumpFinished = false;
 let lastSabrUrl = "";
 let lastSabrBody: Uint8Array | null = null;
@@ -101,48 +104,46 @@ function writeJsonLine(prefix: string, value: unknown): void {
     );
 }
 
-function finishDump(after?: () => void): void {
+function finishDump(report?: () => Promise<void>): void {
   const pipe = dump;
   dump = null;
-  if (!pipe) {
-    if (after) after();
-    return;
+  if (pipe) {
+    writeChain = writeChain
+      .then(function () {
+        return wait(pipe.sink.close());
+      })
+      .then(function () {
+        return pipe.source.readJsonObject();
+      })
+      .then(function () {
+        pipe.source.close();
+        return scopedCache(SCOPE, keepCount(KEEP));
+      })
+      .then(
+        function () {},
+        function (e) {
+          try {
+            pipe.source.close();
+          } catch (_e) {}
+          warn(e, "close");
+        },
+      );
   }
-  writeChain = writeChain
-    .then(function () {
-      return wait(pipe.sink.close());
-    })
-    .then(function () {
-      return pipe.source.readJsonObject();
-    })
-    .then(function () {
-      pipe.source.close();
-      return scopedCache(SCOPE, keepCount(KEEP));
-    })
-    .then(
-      function () {
-        if (after) after();
-      },
-      function (e) {
-        try {
-          pipe.source.close();
-        } catch (_e) {}
-        warn(e, "close");
-        if (after) after();
-      },
-    );
+  const closed = writeChain;
+  finishing = finishing.then(function () {
+    return closed;
+  });
+  if (report) finishing = finishing.then(report);
 }
 
 // Player engine teardown: save what the session recorded instead of losing it to the hard close.
 onShutdown(function () {
-  return new Promise<void>(function (resolve) {
-    finishDump(resolve);
-  });
+  finishDump();
+  return finishing;
 });
 
-function captureReject(sps: number): void {
-  const key = sessionKey;
-  callHost("log/capture", async function (pipe) {
+function captureReject(sps: number, key: string): Promise<void> {
+  return callHost("log/capture", async function (pipe) {
     let p = pipe.sink.writeObjectAsJson({
       "code": "E20088",
       "message": "PO rejected sps=" + sps,
@@ -201,6 +202,7 @@ export function finishBotguardDump(): void {
 export function recordBotguardInit(p: Record<string, unknown>): void {
   finishDump();
   loggedSps = 0;
+  withheldRounds = 0;
   dumpFinished = false;
   writeChain = Promise.resolve();
   lastSabrUrl = "";
@@ -266,18 +268,28 @@ export function recordSabrForDump(url: string, body: Uint8Array | null): void {
 
 let poRejectedHook: (() => void) | null = null;
 
-/** Called on StreamProtectionStatus 3: googlevideo rejected this session's PO token. */
+/** Same limit as the download's SabrSession.maxConsecutiveEmptyRounds. */
+const MAX_WITHHELD_ROUNDS = 3;
+
+/** Called on StreamProtectionStatus 3 (googlevideo rejected this session's PO token), or when
+ *  googlevideo keeps withholding media while attestation stays pending (2). */
 export function setPoRejectedHook(hook: (() => void) | null): void {
   poRejectedHook = hook;
 }
 
-export function noteSps(sps: number): void {
+export function noteSps(sps: number, media: number): void {
+  if (media > 0 || sps === 1) withheldRounds = 0;
+  else if (sps === 2) withheldRounds++;
   if (!(sps > 0)) return;
   if (loggedSps !== sps) {
     loggedSps = sps;
     console.info("bg sps=" + sps);
   }
-  if (sps === 3 && poRejectedHook) poRejectedHook();
+  if (sps === 3 || withheldRounds > MAX_WITHHELD_ROUNDS) {
+    if (sps === 2) console.warn("bg sps=2 withheld media for " + withheldRounds + " rounds");
+    withheldRounds = 0;
+    if (poRejectedHook) poRejectedHook();
+  }
   if (dumpFinished) return;
   if (typeof __bgEntropyStop === "function") __bgEntropyStop();
   // 2 = attestation pending, not a verdict: googlevideo follows up with 1 (ok) or 3 (rejected).
@@ -317,9 +329,13 @@ export function noteSps(sps: number): void {
   }
   lastSabrUrl = "";
   lastSabrBody = null;
-  if (sps === 1) finishDump();
-  else
+  if (sps === 1) {
+    finishDump();
+  } else {
+    // The report waits on the put, and a later mint or entropy read opens the next session's dump.
+    const key = sessionKey;
     finishDump(function () {
-      captureReject(sps);
+      return captureReject(sps, key);
     });
+  }
 }

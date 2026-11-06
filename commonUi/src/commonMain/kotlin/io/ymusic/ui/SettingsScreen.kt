@@ -101,6 +101,7 @@ import kotlinx.coroutines.withContext
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
 import projectcommon.error.runSuspendCatching
+import projectcommon.log.captureUnlessNetwork
 
 @Composable
 fun SettingsScreen(graph: AppGraph, signedIn: Boolean = false, onLogin: () -> Unit = {}) {
@@ -126,7 +127,7 @@ fun SettingsScreen(graph: AppGraph, signedIn: Boolean = false, onLogin: () -> Un
     }
     suspend fun applyLocale(gl: String?) {
         runSuspendCatching { graph.engines.applyYtLocale(gl) }
-            .onFailure { graph.logger?.fork("settings")?.captureError(it, "applyYtLocale failed — UI reloads as if it changed") }
+            .onFailure { graph.logger?.fork("settings")?.captureUnlessNetwork(it, "applyYtLocale failed — UI reloads as if it changed") }
         localeRevision++ // re-ask: the labels and the automatic answer follow the new locale
         graph.localeEpoch.value++ // locale-shaped caches (Discover feeds) refetch
     }
@@ -179,6 +180,7 @@ fun SettingsScreen(graph: AppGraph, signedIn: Boolean = false, onLogin: () -> Un
         SettingsSection(Res.string.settings_section_playback) {
             SoundRow(graph, speed = true)
             SoundRow(graph, speed = false)
+            CaptionStyleRow(graph)
             ToggleRow(graph, AppSettings.enablePip, Res.string.settings_enable_pip, Res.string.settings_enable_pip_hint)
             if (graph.audioFocusSetting) AudioFocusRow(graph)
             ToggleRow(
@@ -212,7 +214,7 @@ fun SettingsScreen(graph: AppGraph, signedIn: Boolean = false, onLogin: () -> Un
                 ToggleRow(graph, AppSettings.autoDownloadUpdates, Res.string.settings_auto_update, Res.string.settings_auto_update_hint)
             }
             val config by remember(graph) { graph.remoteConfig ?: emptyFlow() }.collectAsState(initial = null)
-            config?.changelogUrl?.let { LinkRow(Res.string.settings_changelog, it) }
+            config?.features?.changelogUrl?.let { LinkRow(Res.string.settings_changelog, it) }
             val links = AppLinks(config)
             LinkRow(Res.string.settings_source_code, links.sourceCode)
             LinkRow(Res.string.settings_terms, links.terms)

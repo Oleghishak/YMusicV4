@@ -40,7 +40,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CloseableCoroutineDispatcher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.IO
@@ -64,6 +63,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import projectcommon.error.TechnicalException
 import projectcommon.error.errorCode
@@ -166,7 +166,6 @@ class MsePlayer internal constructor(
     private var hasPendingVideoSurface = false
     private var viewportW: Int = 640
     private var viewportH: Int = 360
-    private var freshConfigNext = false
 
     /** A newer published player.js, downloaded and verified, waiting for the next session to boot it. */
     private val pendingPlayerJs = MutableStateFlow<VerifiedBundle?>(null)
@@ -178,15 +177,10 @@ class MsePlayer internal constructor(
         playerJs.published.conflate().collect { remote -> if (remote != null) download(remote) }
     }
 
-    /** The next session takes its player config from a new homepage scrape ([PlayerImpl] resets). */
-    override fun refreshOnNext() {
-        freshConfigNext = true
-    }
-
     override fun init() {
         requireMainThread()
         if (released || session != null) return
-        startSession("init")
+        startSession("init", freshConfig = false)
     }
 
     override fun reset() = reset("unspecified")
@@ -195,7 +189,7 @@ class MsePlayer internal constructor(
         requireMainThread()
         if (released) return
         tearDownSession("reset: $reason")
-        startSession("reset: $reason")
+        startSession("reset: $reason", freshConfig = true)
     }
 
     override fun load(
@@ -363,16 +357,15 @@ class MsePlayer internal constructor(
         session?.player?.setVideoSurface(surface)
     }
 
-    /** Display hole in CSS pixels. YouTube Auto ABR uses this. Never report a hole shorter than 360. */
+    /**
+     * Display hole in CSS pixels; YouTube Auto ABR uses it × devicePixelRatio. No floor here: base.js
+     * raises the viewport it sends to at least 640x360 real pixels itself.
+     */
     fun setViewport(width: Int, height: Int) {
         requireMainThread()
         if (released) return
-        var holeWidth = width.coerceAtLeast(1)
-        var holeHeight = height.coerceAtLeast(1)
-        if (holeHeight < 360) {
-            holeWidth = (holeWidth * 360.0 / holeHeight).toInt().coerceAtLeast(1)
-            holeHeight = 360
-        }
+        val holeWidth = width.coerceAtLeast(1)
+        val holeHeight = height.coerceAtLeast(1)
         if (holeWidth == viewportW && holeHeight == viewportH) return
         viewportW = holeWidth
         viewportH = holeHeight
@@ -391,6 +384,11 @@ class MsePlayer internal constructor(
 
     override fun presentedFrames(): Int =
         if (!hostLive()) 0 else videoSurface.presentedFrames()
+
+    override fun droppedFrames(): Int =
+        if (!hostLive()) 0 else videoSurface.droppedFrames()
+
+    override fun videoDecoder(): String? = if (!hostLive()) null else videoSurface.videoDecoder().ifEmpty { null }
 
     /** A closing session frees its native host off main, only after main has cleared its player. */
     private fun hostLive(): Boolean = !released && session?.player != null
@@ -426,8 +424,13 @@ class MsePlayer internal constructor(
     }
 
     /** Boot is a blocking eval on the engine thread; null (reported) when [source] will not boot. */
-    private suspend fun bootOrNull(engineThread: CoroutineDispatcher, source: String, failure: String): DynamicEnginePlayer? = try {
-        withContext(engineThread + NonCancellable) { buildPlayer(engineThread, source) }
+    private suspend fun bootOrNull(
+        engineThread: CoroutineDispatcher,
+        source: String,
+        failure: String,
+        onBuilt: (DynamicEnginePlayer) -> Unit,
+    ): DynamicEnginePlayer? = try {
+        withContext(engineThread + NonCancellable) { buildPlayer(engineThread, source).also(onBuilt) }
     } catch (error: CancellationException) {
         throw error
     } catch (error: Throwable) {
@@ -435,9 +438,10 @@ class MsePlayer internal constructor(
         null
     }
 
-    private fun startSession(reason: String) {
+    /** [freshConfig] re-scrapes the homepage: a reset session's held params may be the ones the server rejected. */
+    private fun startSession(reason: String, freshConfig: Boolean) {
         check(session == null) { "mse session already running" }
-        log?.log(Logger.Level.INFO, "mse session start ($reason) freshConfig=$freshConfigNext")
+        log?.log(Logger.Level.INFO, "mse session start ($reason) freshConfig=$freshConfig")
         _status.update { it.copy(state = PlaybackState.Uninitialized(isInitializing = true)) }
         val newSession = Session(SupervisorJob(mainScope.coroutineContext[Job]))
         session = newSession
@@ -447,27 +451,34 @@ class MsePlayer internal constructor(
             withContext(NonCancellable) { previousClose?.join() }
             ensureActive()
             val engineThread = newEngineThread()
-            var enginePlayer: DynamicEnginePlayer? = null
+            // Set from inside the boot: cancelling the session mid-boot discards withContext's result,
+            // and the runtime it built must still reach the finally.
+            var builtPlayer: DynamicEnginePlayer? = null
             try {
                 // A remote bundle that will not boot must not take playback down with it: the next
-                // one down boots. Each built player is assigned at once so it reaches the finally.
+                // one down boots.
+                var enginePlayer: DynamicEnginePlayer? = null
                 val fresh = pendingPlayerJs.getAndUpdate { null }
                 if (fresh != null) {
-                    enginePlayer = bootOrNull(engineThread, fresh.source, "player.js v${fresh.version} failed to boot, discarded")
+                    enginePlayer = bootOrNull(engineThread, fresh.source, "player.js v${fresh.version} failed to boot, discarded") {
+                        builtPlayer = it
+                    }
                     if (enginePlayer == null) rejectedPlayerJs.update { it + fresh.remote } else keep(fresh)
                 }
                 if (enginePlayer == null) {
                     enginePlayer = playerJs.getCached()?.let { (source, version) ->
-                        bootOrNull(engineThread, source, "player.js v$version failed to boot, using the embedded one")
+                        bootOrNull(engineThread, source, "player.js v$version failed to boot, using the embedded one") {
+                            builtPlayer = it
+                        }
                     }
                 }
                 if (enginePlayer == null) {
-                    enginePlayer = withContext(engineThread + NonCancellable) { buildPlayer(engineThread, playerJs.getEmbed().first) }
+                    enginePlayer = withContext(engineThread + NonCancellable) {
+                        buildPlayer(engineThread, playerJs.getEmbed().first).also { builtPlayer = it }
+                    }
                 }
                 newSession.player = enginePlayer
                 if (hasPendingVideoSurface) enginePlayer.setVideoSurface(pendingVideoSurface)
-                val freshConfig = freshConfigNext
-                freshConfigNext = false
                 withTimeoutOrNull(INIT_TIMEOUT_MS) { enginePlayer.init(log, viewportW, viewportH, freshConfig) }
                     ?: throw TechnicalException("E60066", "mse player/init not done within $INIT_TIMEOUT_MS ms")
                 listen(newSession, enginePlayer)
@@ -493,25 +504,28 @@ class MsePlayer internal constructor(
                 if (session === newSession) fail(error, "mse init failed", needReset = true)
             } finally {
                 newSession.player = null
-                withContext(Dispatchers.Default + NonCancellable) {
-                    if (enginePlayer != null) closePlayerBounded(enginePlayer)
-                    closeEngineThread(engineThread)
-                }
+                withContext(Dispatchers.Default + NonCancellable) { closeSessionEngine(builtPlayer, engineThread) }
             }
         }
     }
 
     /**
      * A wedged engine thread never runs its close hop, so the wait is bounded and the successor
-     * boots anyway. [CoroutineStart.UNDISPATCHED] so the close's engine-thread hop is already
-     * queued — ahead of [closeEngineThread] — by the time this suspends.
+     * boots anyway. The thread closes strictly after its runtime, wedged or not: a closed executor
+     * sends every coroutine still bound to it to Dispatchers.IO, into JS from several threads.
      */
-    private suspend fun closePlayerBounded(enginePlayer: DynamicEnginePlayer) {
-        val closeJob = cleanupScope.launch(start = CoroutineStart.UNDISPATCHED) {
+    private suspend fun closeSessionEngine(enginePlayer: DynamicEnginePlayer?, engineThread: CloseableCoroutineDispatcher) {
+        if (enginePlayer == null) {
+            closeEngineThread(engineThread)
+            return
+        }
+        val closeJob = cleanupScope.launch {
             try {
                 enginePlayer.close()
             } catch (error: Throwable) {
                 log?.log(Logger.Level.WARN, "mse close failed", error)
+            } finally {
+                closeEngineThread(engineThread)
             }
         }
         if (withTimeoutOrNull(ENGINE_CLOSE_TIMEOUT_MS) { closeJob.join() } == null) {
@@ -519,8 +533,7 @@ class MsePlayer internal constructor(
         }
     }
 
-    /** Queued work still drains, then the thread exits. Off main and not awaited: native `close`
-     *  blocks until the worker terminates, which a wedged engine thread never does. */
+    /** Off main and not awaited: native `close` blocks until the worker terminates. */
     private fun closeEngineThread(engineThread: CloseableCoroutineDispatcher) {
         cleanupScope.launch(Dispatchers.IO) {
             try {
@@ -580,9 +593,7 @@ class MsePlayer internal constructor(
             state = awaitSettled()
         }
         val enginePlayer = session?.player
-        // An error the last playback left behind (no reset needed) doesn't stop a request for another video.
-        val usable = state.readyToLoad || (state is PlaybackState.Error && !state.error.needReset)
-        if (!usable || enginePlayer == null) {
+        if (!state.readyToLoad || enginePlayer == null) {
             throw TechnicalException(
                 "E60034",
                 "mse engine not ready: $state",
@@ -840,6 +851,7 @@ class MsePlayer internal constructor(
             cacheStore: CacheStore? = null,
             cookieJar: CookieJar = client.cookieJar,
             settings: SettingsStore? = null,
+            remoteFeature: (suspend (String) -> JsonElement?)? = null,
             videoSurface: MseVideoSurface,
             main: DynamicEngineManager,
             mediaProxy: LocalMediaProxy? = null,
@@ -855,6 +867,7 @@ class MsePlayer internal constructor(
                     cacheStore = cacheStore,
                     cookieJar = cookieJar,
                     settings = settings,
+                    remoteFeature = remoteFeature,
                     videoSurface = videoSurface,
                     main = main,
                     onBackendVersion = onPlayerJsVersion,

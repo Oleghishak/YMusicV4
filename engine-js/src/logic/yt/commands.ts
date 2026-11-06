@@ -20,6 +20,7 @@ import {
 } from "./session";
 import { localeOptions } from "./locales";
 import { harvestCommand, recommendedPage } from "./recommended";
+import { showPlaylistId } from "./musicParse";
 import {
   collectItems,
   collectPage,
@@ -84,7 +85,7 @@ async function browsePage(fields: Record<string, unknown>, log?: JsLogger): Prom
 // later load — fresh or continuation — browses normally.
 let homeBootstrapUsed = false;
 
-const PLAYER_CONFIG_MAX_AGE_MS = 60 * 60 * 1000;
+const PLAYER_CONFIG_MAX_AGE_MS = 20 * 60 * 1000;
 
 onAccept(
   "get_player_config",
@@ -579,13 +580,16 @@ onAccept(
   }),
 );
 
-/** The playlist an app link plays: "/playlist?list=<id>", or a YouTube Music "…?id=VL<id>" page. */
+/** The playlist an app link plays: "/playlist?list=<id>", or a YouTube Music "…?id=VL<id>" page or
+ *  podcast show. */
 function queuePlaylistId(url: string): string {
   const query = urlQuery(url);
   const list = query["list"];
   if (list !== undefined) return list;
   const id = query["id"];
   if (id !== undefined && id.indexOf("VL") === 0) return id.slice(2);
+  const show = showPlaylistId(id);
+  if (show !== undefined) return show;
   throw JsEngineErrorImpl.parse("yt/queue url names no playlist: " + url);
 }
 
