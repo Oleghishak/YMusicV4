@@ -1,9 +1,11 @@
 <resources>
+    <string name="app_name">YMusic V4</string>
     <string name="playback_notification_channel">Відтворення</string>
     <string name="notification_previous">Попередній</string>
     <string name="notification_play">Відтворити</string>
     <string name="notification_pause">Пауза</string>
     <string name="notification_next">Наступний</string>
+    <string name="notification_close">Закрити</string>
     <string name="notifications_required">YMusic відтворює музику у фоновій службі, яка має показувати сповіщення про відтворення. Дозвольте сповіщення, щоб продовжити.</string>
     <string name="notifications_allow">Дозволити сповіщення</string>
     <string name="download_notification_channel">Завантаження</string>
@@ -18,7 +20,7 @@
     <string name="downloads_summary_finished">Завершено: %1$d</string>
     <string name="downloads_summary_failed">Помилок: %1$d</string>
     <string name="downloads_summary_paused">На паузі: %1$d</string>
-    <string name="downloads_pause_all">Призупинити все</string>
+    <string name="downloads_pause_all">Призупинити всі</string>
     <string name="share_play">Відтворити</string>
     <string name="share_download_mp3">Завантажити MP3</string>
     <string name="share_download_m4a">Завантажити M4A</string>
