@@ -20,7 +20,7 @@
     <string name="downloads_summary_finished">Завершено: %1$d</string>
     <string name="downloads_summary_failed">Помилок: %1$d</string>
     <string name="downloads_summary_paused">На паузі: %1$d</string>
-    <string name="downloads_pause_all">Призупинити всі</string>
+    <string name="downloads_pause_all">Призупинити все</string>
     <string name="share_play">Відтворити</string>
     <string name="share_download_mp3">Завантажити MP3</string>
     <string name="share_download_m4a">Завантажити M4A</string>
@@ -30,7 +30,7 @@
     <string name="widget_compact_name">Плеєр · Компактний</string>
     <string name="widget_large_name">Плеєр · Великий</string>
     <string name="widget_square_name">Плеєр · Квадратний</string>
-    <string name="widget_description">Що зараз грає, з керуванням відтворенням</string>
+    <string name="widget_description">Відтворення з елементами керування.</string>
     <string name="widget_nothing_playing">Нічого не грає</string>
     <string name="widget_open_to_start">Відкрийте YMusic, щоб слухати</string>
 </resources>
